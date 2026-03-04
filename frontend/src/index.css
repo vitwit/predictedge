@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0f1117;
+  --panel: #161b27;
+  --border: #1e2538;
+  --accent: #6366f1;
+  --up: #22c55e;
+  --down: #ef4444;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: #e2e8f0;
+  font-family: 'Inter', sans-serif;
+  margin: 0;
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f1117;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2d3748;
+  border-radius: 3px;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.glow-up {
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.3);
+}
+
+.glow-down {
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.3);
+}
+
+.streak-dot-up {
+  @apply inline-block w-3 h-3 rounded-full bg-up mx-0.5;
+}
+
+.streak-dot-down {
+  @apply inline-block w-3 h-3 rounded-full bg-down mx-0.5;
+}
+
+.next-market-pulse {
+  animation: pulse-gray 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse-gray {
+  0% {
+    box-shadow: 0 0 0 0 rgba(148, 163, 184, 0.3);
+    background: rgba(148, 163, 184, 0.06);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(148, 163, 184, 0.02);
+    background: rgba(148, 163, 184, 0.12);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(148, 163, 184, 0.3);
+    background: rgba(148, 163, 184, 0.06);
+  }
+}
