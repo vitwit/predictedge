@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const api = axios.create({
+export const api = axios.create({
   baseURL: '/api',
   timeout: 15000,
 })
@@ -78,6 +78,31 @@ export const getPatternMatrix = (asset: string, interval: number, seq_len = 3) =
 
 export const getTopPatterns = (asset: string, interval: number, min_samples = 20) =>
   api.get('/analytics/patterns/top', { params: { asset, interval, min_samples } }).then(r => r.data)
+
+export default api
+
+export const getLiveSignals = (interval: number) =>
+  api.get('/trading/live-signals', { params: { interval } }).then(r => r.data)
+
+export const getUsdReversalBins = (asset: string, interval: number) =>
+  api.get('/analytics/usd-reversal-bins', { params: { asset, interval } }).then(r => r.data)
+
+export const getSignalEvents = (params: {
+  asset?: string
+  interval?: number
+  decision?: string
+  limit?: number
+}) => api.get('/trading/signal-events', { params }).then(r => r.data)
+
+export const getPatternPredictionsReality = (
+  asset?: string,
+  interval?: number,
+  top_n = 10,
+  recent_limit = 50
+) =>
+  api
+    .get('/analytics/patterns/predictions-reality', { params: { asset, interval, top_n, recent_limit } })
+    .then(r => r.data)
 
 export const getMomentumStats = (asset: string, interval: number) =>
   api.get('/analytics/momentum', { params: { asset, interval } }).then(r => r.data)

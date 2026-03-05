@@ -429,6 +429,31 @@ def _build_slug_variants(asset: str, interval_minutes: int, window_start_ts: int
 
 
 def _fetch_gamma_market_by_slug(slug: str) -> Optional[Dict]:
+    """
+    Fetch a market by slug. Uses /events endpoint which also returns
+    eventMetadata.priceToBeat (Chainlink open price, available for BTC markets).
+    Falls back to /markets if /events returns no results.
+    """
+    # Try /events first — returns priceToBeat for BTC markets
+    try:
+        resp = requests.get(f"{GAMMA_BASE}/events", params={"slug": slug}, timeout=12)
+        resp.raise_for_status()
+        events = resp.json()
+        if isinstance(events, list) and events:
+            event = events[0]
+            markets = event.get("markets") or []
+            price_to_beat = (event.get("eventMetadata") or {}).get("priceToBeat")
+            for market in markets:
+                if market.get("slug") == slug:
+                    market["_price_to_beat"] = price_to_beat
+                    return market
+            # event slug matches but market list uses different slug structure
+            if markets:
+                markets[0]["_price_to_beat"] = price_to_beat
+                return markets[0]
+    except Exception:
+        pass
+    # Fallback to /markets
     resp = requests.get(f"{GAMMA_BASE}/markets", params={"slug": slug}, timeout=12)
     resp.raise_for_status()
     rows = resp.json()
@@ -466,6 +491,7 @@ def _normalize_closed_market(
     cutoff_ts: Optional[int] = None,
     require_known_asset: bool = True,
     require_supported_interval: bool = True,
+    price_to_beat: Optional[float] = None,
 ) -> Optional[Dict]:
     now_ts = int(time.time())
     title = market.get("question") or market.get("title") or ""
@@ -500,6 +526,7 @@ def _normalize_closed_market(
         "end_date": market.get("endDate"),
         "end_ts": end_ts,
         "close_up_price": _extract_yes_close_price(market),
+        "price_to_beat": price_to_beat,
     }
 
 
@@ -528,8 +555,19 @@ def _upsert_historical_market(market: Dict, conn, now: int):
     ).fetchone()
     open_up = float(open_up_row[0]) if open_up_row and open_up_row[0] is not None else (close_up if close_up is not None else 0.5)
 
-    spot_open = _nearest_spot_price(asset, start_ts, conn)
-    spot_close = _nearest_spot_price(asset, end_ts, conn)
+    # Chainlink open price from eventMetadata.priceToBeat (available for BTC only)
+    chainlink_open = market.get("price_to_beat")
+    if chainlink_open is not None:
+        chainlink_open = float(chainlink_open)
+        spot_open = chainlink_open
+        # Close price will be set later by resync_chainlink.py (= next window's chainlink_open)
+        spot_close = _nearest_spot_price(asset, end_ts, conn)
+        if spot_close is None:
+            spot_close = chainlink_open  # fallback: same price (change=0) until next window fetched
+    else:
+        spot_open = _nearest_spot_price(asset, start_ts, conn)
+        spot_close = _nearest_spot_price(asset, end_ts, conn)
+
     spot_change = (spot_close - spot_open) if (spot_open is not None and spot_close is not None) else None
     spot_change_pct = ((spot_change / spot_open) * 100.0) if (spot_change is not None and spot_open) else None
 
@@ -539,9 +577,10 @@ def _upsert_historical_market(market: Dict, conn, now: int):
         (slug, asset, interval_minutes, start_ts, end_ts,
          open_up_price, close_up_price,
          open_spot_price, close_spot_price,
+         chainlink_open,
          spot_open, spot_close, spot_change_usd, spot_change_pct,
          winner_side, resolved_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(slug) DO UPDATE SET
             asset = excluded.asset,
             interval_minutes = excluded.interval_minutes,
@@ -551,10 +590,16 @@ def _upsert_historical_market(market: Dict, conn, now: int):
             close_up_price = COALESCE(excluded.close_up_price, market_resolutions.close_up_price),
             open_spot_price = COALESCE(market_resolutions.open_spot_price, excluded.open_spot_price),
             close_spot_price = COALESCE(excluded.close_spot_price, market_resolutions.close_spot_price),
-            spot_open = COALESCE(market_resolutions.spot_open, excluded.spot_open),
-            spot_close = COALESCE(excluded.spot_close, market_resolutions.spot_close),
-            spot_change_usd = COALESCE(excluded.spot_change_usd, market_resolutions.spot_change_usd),
-            spot_change_pct = COALESCE(excluded.spot_change_pct, market_resolutions.spot_change_pct),
+            chainlink_open = COALESCE(excluded.chainlink_open, market_resolutions.chainlink_open),
+            spot_open = CASE WHEN excluded.chainlink_open IS NOT NULL THEN excluded.chainlink_open
+                             WHEN excluded.spot_open IS NOT NULL AND excluded.spot_open != 0
+                             THEN excluded.spot_open ELSE COALESCE(market_resolutions.spot_open, excluded.spot_open) END,
+            spot_close = CASE WHEN excluded.spot_close IS NOT NULL AND excluded.spot_close != 0
+                              THEN excluded.spot_close ELSE COALESCE(market_resolutions.spot_close, excluded.spot_close) END,
+            spot_change_usd = CASE WHEN excluded.spot_change_usd IS NOT NULL AND excluded.spot_change_usd != 0
+                                   THEN excluded.spot_change_usd ELSE COALESCE(market_resolutions.spot_change_usd, excluded.spot_change_usd) END,
+            spot_change_pct = CASE WHEN excluded.spot_change_pct IS NOT NULL AND excluded.spot_change_pct != 0
+                                   THEN excluded.spot_change_pct ELSE COALESCE(market_resolutions.spot_change_pct, excluded.spot_change_pct) END,
             winner_side = COALESCE(excluded.winner_side, market_resolutions.winner_side),
             resolved_at = COALESCE(excluded.resolved_at, market_resolutions.resolved_at)
         """,
@@ -562,10 +607,28 @@ def _upsert_historical_market(market: Dict, conn, now: int):
             slug, asset, interval, start_ts, end_ts,
             open_up, close_up,
             spot_open, spot_close,
+            chainlink_open,
             spot_open, spot_close, spot_change, spot_change_pct,
             winner_side, end_ts, now,
         ),
     )
+
+    # Link this window to the previous consecutive window for reversal tracking
+    if spot_change is not None:
+        prev = conn.execute(
+            """SELECT spot_change_usd, spot_change_pct, winner_side
+               FROM market_resolutions
+               WHERE asset=? AND interval_minutes=? AND end_ts=?
+               LIMIT 1""",
+            (asset, interval, start_ts),
+        ).fetchone()
+        if prev and prev["spot_change_usd"] is not None:
+            conn.execute(
+                """UPDATE market_resolutions
+                   SET prev_spot_change_usd=?, prev_spot_change_pct=?, prev_winner_side=?
+                   WHERE slug=?""",
+                (prev["spot_change_usd"], prev["spot_change_pct"], prev["winner_side"], slug),
+            )
 
 
 def sync_historical_markets(days: int = 30) -> Dict[str, int]:
@@ -650,6 +713,7 @@ def sync_all_historical_markets(
                 markets = event.get("markets") or []
                 if not isinstance(markets, list):
                     continue
+                price_to_beat = (event.get("eventMetadata") or {}).get("priceToBeat")
                 for market in markets:
                     page_seen += 1
                     normalized = _normalize_closed_market(
@@ -657,6 +721,7 @@ def sync_all_historical_markets(
                         cutoff_ts=cutoff_ts,
                         require_known_asset=True,
                         require_supported_interval=True,
+                        price_to_beat=price_to_beat,
                     )
                     if not normalized:
                         continue
@@ -707,12 +772,14 @@ def sync_all_historical_markets(
                     markets = event.get("markets") or []
                     if not isinstance(markets, list):
                         continue
+                    price_to_beat = (event.get("eventMetadata") or {}).get("priceToBeat")
                     for market in markets:
                         normalized = _normalize_closed_market(
                             market,
                             cutoff_ts=cutoff_ts,
                             require_known_asset=True,
                             require_supported_interval=True,
+                            price_to_beat=price_to_beat,
                         )
                         if not normalized:
                             continue

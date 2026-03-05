@@ -34,6 +34,16 @@ class Config:
     AUTO_TRADE_LOOP_SECONDS: int = int(os.getenv("AUTO_TRADE_LOOP_SECONDS", "30"))
     TOP_PATTERN_COUNT: int = int(os.getenv("TOP_PATTERN_COUNT", "10"))
     MIN_PATTERN_WIN_RATE_PCT: float = float(os.getenv("MIN_PATTERN_WIN_RATE_PCT", "55"))
+
+    # Fast Reversal Trader — triggers on large USD moves OR extreme CLOB prices at window close
+    # Comma-separated: BTC:200,ETH:20,SOL:2,XRP:0.10
+    REVERSAL_USD_THRESHOLDS: str = os.getenv("REVERSAL_USD_THRESHOLDS", "BTC:200,ETH:20,SOL:2,XRP:0.10")
+    REVERSAL_ORDER_SIZE: float = float(os.getenv("REVERSAL_ORDER_SIZE", str(float(os.getenv("DEFAULT_ORDER_SIZE", "5")))))
+    REVERSAL_ORDER_PRICE: float = float(os.getenv("REVERSAL_ORDER_PRICE", "0.40"))
+    REVERSAL_MONITOR_WINDOW_S: int = int(os.getenv("REVERSAL_MONITOR_WINDOW_S", "45"))
+    REVERSAL_ORDER_DELAY_S: int = int(os.getenv("REVERSAL_ORDER_DELAY_S", "0"))  # 0 = fire immediately when next market appears
+    REVERSAL_CLOB_HIGH: float = float(os.getenv("REVERSAL_CLOB_HIGH", "0.82"))  # UP token > this → strong UP → reverse DOWN
+    REVERSAL_CLOB_LOW:  float = float(os.getenv("REVERSAL_CLOB_LOW",  "0.18"))  # UP token < this → strong DOWN → reverse UP
     AUTO_CLAIM_INTERVAL_SECONDS: int = int(os.getenv("AUTO_CLAIM_INTERVAL_SECONDS", "600"))
 
     # Binance WebSocket

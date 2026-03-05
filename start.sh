@@ -38,6 +38,9 @@ cleanup() {
     if [ "$STARTED_BACKEND" -eq 1 ] && [ -n "$BACKEND_PID" ]; then
         kill "$BACKEND_PID" 2>/dev/null || true
     fi
+    if [ -n "$RESYNC_PID" ]; then
+        kill "$RESYNC_PID" 2>/dev/null || true
+    fi
     exit 0
 }
 
@@ -152,4 +155,16 @@ echo ""
 echo "Press Ctrl+C to stop all services"
 
 trap cleanup SIGINT SIGTERM
+
+# Background spot-data refresh: runs every 6 hours to keep historical_spot current
+(
+  while true; do
+    sleep 21600  # 6 hours
+    echo "⟳  Refreshing spot data (delta fetch)..."
+    cd "$ROOT/backend" && python scripts/resync_spot.py >> "$ROOT/backend/logs/resync_spot.log" 2>&1
+    echo "✅ Spot data refresh complete"
+  done
+) &
+RESYNC_PID=$!
+
 wait

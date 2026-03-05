@@ -285,3 +285,222 @@ Only trade if:
 
 This is intentionally broad and long-term.  
 We can now prioritize a small set of high-ROI signals and implement them one by one with proper validation.
+
+---
+
+## 12) What Is Missing Today (Gap Analysis)
+
+Current app is strong on descriptive analytics (streaks/patterns/history), but still weak on **execution-grade quant intelligence**.
+
+### Missing in data layer
+
+- No standardized **1s feature store** joining orderbook + spot + tick deltas per market window.
+- No robust **quality flags** (missing ticks, stale quotes, outlier spreads, bad price points).
+- No persistent **signal snapshots** (what signal fired, when, and under what context).
+
+### Missing in signal engine
+
+- No production **signal fusion** (pattern + orderbook + momentum + regime).
+- No calibrated **probability model** (`p(win)` with confidence intervals).
+- No **EV gate** after fees/slippage; current flow can trade on edge without net-EV checks.
+- No explicit **NO_TRADE** state based on market quality filters.
+
+### Missing in risk/execution
+
+- No portfolio-level **exposure caps** across correlated assets/windows.
+- No live **drawdown guardrails** and adaptive risk throttling.
+- No execution-quality metrics (fill quality, slippage vs expected).
+
+### Missing in dashboard (quant UX)
+
+- No real-time **signal tape** with reason codes.
+- No **hotspot/impulse/wall** live panels.
+- No **regime dashboard** (volatility, spread state, liquidity quality).
+- No **edge health** panel (signal decay, rolling win-rate, confidence calibration).
+- No **strategy explainability** card for each live trade decision.
+
+---
+
+## 13) Prioritized TODO (Implement One by One)
+
+Order below is optimized for fastest path to measurable profitability improvement.
+
+### P0 - Foundation and trust (must-have first)
+
+1. **Data quality guardrails**
+   - Implement snapshot validity checks and drop/flag bad rows.
+   - Success criteria:
+     - <1% missing critical fields per day,
+     - no invalid probabilities (`<=0` or `>=1`) in tradable entries.
+
+2. **Signal event logging**
+   - Create table for `signal_events` (inputs, score, decision, reason codes, ts).
+   - Success criteria:
+     - every order links to a signal event id,
+     - every rejected decision has explicit reason codes.
+
+3. **Decision policy skeleton**
+   - Add deterministic middle-layer contract:
+     - input signals -> score -> `APPROVE/REJECT` + reasons.
+   - Success criteria:
+     - auto-trader never bypasses this layer.
+
+### P1 - First profitable signal bundle
+
+4. **Hotspot detector**
+   - Time-in-zone + dominant depth side + hold duration.
+   - Success criteria:
+     - report win-rate by zone regime with min sample threshold,
+     - expose live hotspot confidence in UI.
+
+5. **Impulse detector**
+   - Detect `>=Xc in Ys`, classify continuation/reversal.
+   - Success criteria:
+     - per-asset continuation table with confidence bounds,
+     - live impulse panel + cooldown policy.
+
+6. **Spread + liquidity risk gate**
+   - Reject entries when spread wide / depth too thin.
+   - Success criteria:
+     - measurable reduction in bad fills/slippage.
+
+### P2 - Scale and robustness
+
+7. **Regime classifier**
+   - Label each window (`trend`, `mean_revert`, `chop`, `high_vol`).
+   - Success criteria:
+     - signal performance split by regime available in dashboard.
+
+8. **Position sizing model**
+   - Confidence- and liquidity-adjusted size with hard caps.
+   - Success criteria:
+     - reduced drawdowns at same or better Sharpe.
+
+9. **Edge decay monitor**
+   - Auto-disable signals with drift/instability.
+   - Success criteria:
+     - stale signal auto-pauses before prolonged underperformance.
+
+### P3 - Pro quant UI and operations
+
+10. **Live signal tape**
+    - Shows score, EV, confidence, reason codes, decision.
+11. **Execution quality panel**
+    - expected vs realized fill price, slippage and miss rate.
+12. **Attribution panel**
+    - PnL by signal family, regime, asset, interval.
+
+---
+
+## 14) Immediate Build Queue (Next 3 sprints)
+
+### Sprint 1 (fast win)
+
+- Implement `signal_events` table + decision policy wrapper in auto-trader.
+- Add spread/liquidity reject gate.
+- Add signal decision logs to Pattern Lab section.
+
+### Sprint 2
+
+- Build hotspot detector + backtest report + live panel.
+- Add impulse detector + continuation/reversion analytics.
+
+### Sprint 3
+
+- Add regime classifier and confidence calibration.
+- Add portfolio-level risk controls and exposure caps.
+
+---
+
+## 16) Deep Signal Gap Analysis — Ground Truth from Data (Mar 2026)
+
+### What the data actually tells us
+
+After running analysis on real DB rows:
+
+1. **open_up_price is mostly 0 or 1 (binary)** — only ~52 rows have a valid midpoint open price.
+   This means we have *almost no usable opening market price data* from historical ingestion.
+   The data we have is resolved-price (0 or 1), not the live market price at open.
+
+2. **spot_change_pct has strong directional edge** (small sample, but clear):
+   - spot up >0.3%: UP wins 84–100% of the time
+   - spot down <-0.3%: UP wins 0% of the time
+   - spot flat: UP wins ~50%
+   This is the strongest raw signal in the DB right now.
+
+3. **Cross-asset alignment is real** (2000 windows):
+   - BTC/ETH same direction: 84% of windows
+   - BTC/ETH/SOL all same: 75% of windows
+   This is a very usable confirmation filter.
+
+4. **Live price ticks exist** (~8000 ticks, 244 slugs).
+   Good: we have elapsed/remaining seconds and up_price at each tick.
+   Issue: ticks are all for recent markets and mostly near end-of-window (elapsed=257-301s).
+   We need early-in-window ticks to build proper entry signals.
+
+5. **Spot prices are fresh** (3s old, continuous feed ✓).
+   This is the most reliable live signal input we have right now.
+
+---
+
+### The 3 highest-value signals we can build RIGHT NOW with existing data
+
+#### Signal A: Spot Momentum Signal (immediate, data already available)
+- Compute spot_change_pct over last 30s/60s/120s from spot_prices table.
+- Cross-reference with historical win-rate for same spot_change_pct bin + asset + interval.
+- Expected edge: massive when spot move > 0.3% (84%+ historical win rate).
+- Can be live right now — spot feed is running.
+
+#### Signal B: Cross-asset Direction Confirmation (immediate)
+- Check current directional signal for all 4 assets.
+- If 3+ agree: apply confirmation multiplier to confidence.
+- If signals conflict: reduce size or skip.
+- Historical base: 75-84% cross-asset agreement rate.
+
+#### Signal C: Fair Value Gap (requires live market price from CLOB)
+- Compute: what should the market price be given current spot movement?
+- Formula: historical_win_rate(asset, interval, spot_chg_bin) → implied_fair_value
+- If live_market_price < fair_value by > 5¢: BUY signal (market is under-pricing this outcome).
+- If live_market_price > fair_value by > 5¢: skip or fade.
+- This is the single highest-value signal for systematic profit.
+
+---
+
+### Why current signals are weak
+
+The existing pattern-based signals (streak reversal etc.) have a structural problem:
+- They look at *past outcomes* (UP/DOWN streaks) as predictors of next outcome.
+- These are essentially backward-looking and treat the market as a random walk with autocorrelation.
+- They are *not* using the actual information in the market price, spot price, or orderbook.
+
+A market priced at 62¢ with spot up 0.5% and 2min remaining is *fundamentally different*
+from a market priced at 62¢ at market open with flat spot. Current system treats them identically.
+
+The missing piece: **current state** (live price + spot + time remaining) as primary signal,
+with historical patterns as secondary confirmation only.
+
+---
+
+### Revised signal priority (what to build first)
+
+| # | Signal | Data needed | Build effort | Expected impact |
+|---|--------|-------------|--------------|-----------------|
+| 1 | Spot momentum (spot_change vs win_rate) | spot_prices ✓ | Low | Very High |
+| 2 | Cross-asset confirmation | spot_prices ✓ | Low | High |
+| 3 | Fair value gap (market price vs spot-implied) | CLOB midpoint + spot | Medium | Very High |
+| 4 | Time-weighted convergence (late-stage price) | price_ticks ✓ | Medium | High |
+| 5 | Opening market price bias | Need better open price ingestion | High | High |
+| 6 | Orderbook imbalance | CLOB book ✓ (decision_policy) | Medium | Medium |
+| 7 | Pattern + regime conditioning | price_ticks partial | High | Medium |
+
+---
+
+## 15) Definition of Done for "Quant-Strong Dashboard"
+
+Dashboard can be called quant-strong when all are true:
+
+- live signals show `score`, `p(win)`, `EV`, `confidence`, and reason codes;
+- every trade is attributable to a recorded signal decision;
+- strategy has walk-forward validated edge net of fees/slippage;
+- risk controls are active and visible (caps, drawdown guard, kill switch);
+- edge decay monitoring can auto-disable degraded signals.

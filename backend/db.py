@@ -258,8 +258,74 @@ def init_db():
     );
 
     CREATE INDEX IF NOT EXISTS idx_auto_claims_created_at ON auto_claims(created_at);
+
+    CREATE TABLE IF NOT EXISTS signal_events (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug              TEXT NOT NULL,
+        asset             TEXT NOT NULL,
+        interval_minutes  INTEGER NOT NULL,
+        pattern_str       TEXT NOT NULL,
+        predicted_side    TEXT NOT NULL,
+
+        -- raw signal inputs
+        win_rate          REAL,
+        edge_pct          REAL,
+        sample_count      INTEGER,
+        spread_cents      REAL,
+        bid_depth_5c      REAL,
+        ask_depth_5c      REAL,
+        depth_imbalance   REAL,
+        spot_vol_30s      REAL,
+        time_remaining_s  INTEGER,
+
+        -- computed scores
+        ev_score          REAL,
+        confidence        REAL,
+
+        -- decision
+        decision          TEXT NOT NULL,  -- APPROVE | REJECT
+        reject_reasons    TEXT,           -- JSON array of reason codes
+        order_id          INTEGER,        -- FK -> auto_trade_orders.id
+
+        created_at        INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_signal_events_slug ON signal_events(slug);
+    CREATE INDEX IF NOT EXISTS idx_signal_events_created_at ON signal_events(created_at);
+    CREATE INDEX IF NOT EXISTS idx_signal_events_decision ON signal_events(decision);
     """)
 
     conn.commit()
+    _migrate(conn)
     conn.close()
     print("[db] Database initialized")
+
+
+def _migrate(conn):
+    """Add new columns to existing tables without breaking existing data."""
+    cur = conn.cursor()
+    existing = {r[1] for r in cur.execute("PRAGMA table_info(market_resolutions)")}
+
+    new_cols = [
+        ("prev_spot_change_usd",  "REAL"),
+        ("prev_spot_change_pct",  "REAL"),
+        ("prev_winner_side",      "TEXT"),
+        ("chainlink_open",        "REAL"),  # Chainlink BTC/USD price at window open (from priceToBeat)
+    ]
+    for col, col_type in new_cols:
+        if col not in existing:
+            cur.execute(f"ALTER TABLE market_resolutions ADD COLUMN {col} {col_type}")
+            print(f"[db] migrated: added market_resolutions.{col}")
+
+    # auto_trade_orders migrations
+    ato_cols = {r[1] for r in cur.execute("PRAGMA table_info(auto_trade_orders)")}
+    ato_new = [
+        ("trigger_type", "TEXT DEFAULT 'PATTERN'"),  # PATTERN | REVERSAL
+        ("trigger_usd_move", "REAL"),                # USD move that triggered reversal
+    ]
+    for col, col_type in ato_new:
+        if col not in ato_cols:
+            cur.execute(f"ALTER TABLE auto_trade_orders ADD COLUMN {col} {col_type}")
+            print(f"[db] migrated: added auto_trade_orders.{col}")
+
+    conn.commit()

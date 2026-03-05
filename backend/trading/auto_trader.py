@@ -18,6 +18,11 @@ from analytics.patterns import find_top_patterns
 from config import config
 from db import get_connection
 from ingestion.polymarket import fetch_active_crypto_markets
+from trading.decision_policy import (
+    SignalInputs,
+    evaluate as policy_evaluate,
+    persist_signal_event_with_order,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +95,7 @@ def _record_order(
         conn = get_connection()
     try:
         now = int(time.time())
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT OR IGNORE INTO auto_trade_orders
             (slug, asset, interval_minutes, token_id, pattern_str, predicted_side,
@@ -113,9 +118,56 @@ def _record_order(
             ),
         )
         conn.commit()
+        return cur.lastrowid
     finally:
         if close_conn:
             conn.close()
+
+
+def _live_market_snapshot(client: ClobClient, token_id: str, market: Dict, interval: int) -> Dict:
+    """
+    Pull live spread, depth, imbalance, and time-remaining for a market.
+    Returns a dict of microstructure fields for the decision policy.
+    Falls back gracefully if CLOB call fails.
+    """
+    snap = {
+        "spread_cents": 0.0,
+        "bid_depth_5c": 0.0,
+        "ask_depth_5c": 0.0,
+        "depth_imbalance": 0.0,
+        "time_remaining_s": interval * 60,
+    }
+    try:
+        book = client.get_order_book(token_id)
+        bids = sorted(book.bids or [], key=lambda x: -float(x.price))
+        asks = sorted(book.asks or [], key=lambda x: float(x.price))
+        if bids and asks:
+            best_bid = float(bids[0].price)
+            best_ask = float(asks[0].price)
+            snap["spread_cents"] = round((best_ask - best_bid) * 100, 2)
+            mid = (best_bid + best_ask) / 2.0
+            bid_depth = sum(float(b.size) * float(b.price) for b in bids if mid - float(b.price) <= 0.05)
+            ask_depth = sum(float(a.size) * float(a.price) for a in asks if float(a.price) - mid <= 0.05)
+            snap["bid_depth_5c"] = round(bid_depth, 2)
+            snap["ask_depth_5c"] = round(ask_depth, 2)
+            total_depth = bid_depth + ask_depth
+            if total_depth > 0:
+                snap["depth_imbalance"] = round((bid_depth - ask_depth) / total_depth, 4)
+    except Exception as e:
+        logger.debug("Snapshot fetch failed for token=%s: %s", token_id, e)
+
+    try:
+        start_ts = int(market.get("start_ts") or 0)
+        end_ts = int(market.get("end_ts") or 0)
+        if end_ts > 0:
+            snap["time_remaining_s"] = max(0, end_ts - int(time.time()))
+        elif start_ts > 0:
+            elapsed = int(time.time()) - start_ts
+            snap["time_remaining_s"] = max(0, interval * 60 - elapsed)
+    except Exception:
+        pass
+
+    return snap
 
 
 def _build_client() -> Optional[ClobClient]:
@@ -263,6 +315,35 @@ class AutoTrader:
                         finally:
                             conn.close()
 
+                        # ── Decision Policy gate ─────────────────────────────
+                        snap = _live_market_snapshot(self._client, str(token_id), market, interval)
+                        sig_inputs = SignalInputs(
+                            slug=slug,
+                            asset=asset,
+                            interval_minutes=interval,
+                            pattern_str=pattern_str,
+                            predicted_side=predicted_side,
+                            win_rate=float(signal.get("win_rate", 0)),
+                            edge_pct=float(signal.get("edge", 0)),
+                            sample_count=int(signal.get("sample_count", 0)),
+                            spread_cents=snap["spread_cents"],
+                            bid_depth_5c=snap["bid_depth_5c"],
+                            ask_depth_5c=snap["ask_depth_5c"],
+                            depth_imbalance=snap["depth_imbalance"],
+                            time_remaining_s=snap["time_remaining_s"],
+                            order_price=float(self.order_price),
+                            order_size=float(self.order_size),
+                        )
+                        decision = policy_evaluate(sig_inputs)
+                        if not decision.approved:
+                            logger.info(
+                                "Policy REJECT: %s %s %sm %s | reasons=%s ev=%.4f conf=%.0f",
+                                pattern_str, asset, interval, predicted_side,
+                                decision.reject_reasons, decision.ev_score, decision.confidence,
+                            )
+                            continue
+                        # ────────────────────────────────────────────────────
+
                         try:
                             args = OrderArgs(
                                 token_id=str(token_id),
@@ -271,7 +352,7 @@ class AutoTrader:
                                 side=BUY,
                             )
                             response = self._client.create_and_post_order(args)
-                            _record_order(
+                            order_id = _record_order(
                                 slug=slug,
                                 asset=asset,
                                 interval=interval,
@@ -283,15 +364,13 @@ class AutoTrader:
                                 status="submitted",
                                 response_json=response if isinstance(response, dict) else {"response": str(response)},
                             )
+                            persist_signal_event_with_order(sig_inputs, decision, order_id)
                             logger.info(
-                                "Order SUCCESS: slug=%s asset=%s interval=%sm side=%s price=%.2f size=%.4f pattern=%s",
-                                slug,
-                                asset,
-                                interval,
-                                predicted_side,
-                                self.order_price,
-                                self.order_size,
-                                pattern_str,
+                                "Order SUCCESS: slug=%s asset=%s interval=%sm side=%s "
+                                "price=%.2f size=%.4f pattern=%s ev=%.4f conf=%.0f",
+                                slug, asset, interval, predicted_side,
+                                self.order_price, self.order_size, pattern_str,
+                                decision.ev_score, decision.confidence,
                             )
                         except Exception as exc:
                             _record_order(

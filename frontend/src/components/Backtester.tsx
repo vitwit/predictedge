@@ -6,6 +6,7 @@ import clsx from 'clsx'
 
 const ASSETS = ['BTC', 'ETH', 'SOL', 'XRP']
 const INTERVALS = [5, 15, 60]
+const formatCents = (p: number | null | undefined) => (p == null ? '—' : `${(p * 100).toFixed(1)}¢`)
 
 function MetricCard({ label, value, sub, positive }: { label: string; value: string; sub?: string; positive?: boolean }) {
   return (
@@ -249,8 +250,8 @@ export default function Backtester() {
                         <td className={clsx('px-4 py-2 font-bold text-sm mono', t.entry_side === 'UP' ? 'text-up' : 'text-down')}>
                           {t.entry_side === 'UP' ? '▲' : '▼'} {t.entry_side}
                         </td>
-                        <td className="px-4 py-2 mono text-neutral">{(t.entry_price * 100).toFixed(1)}¢</td>
-                        <td className="px-4 py-2 mono text-neutral">{(t.close_price * 100).toFixed(1)}¢</td>
+                        <td className="px-4 py-2 mono text-neutral">{formatCents(t.entry_price)}</td>
+                        <td className="px-4 py-2 mono text-neutral">{formatCents(t.close_price)}</td>
                         <td className="px-4 py-2">
                           <span className={clsx('text-xs px-2 py-0.5 rounded', t.won ? 'bg-up/10 text-up' : 'bg-down/10 text-down')}>
                             {t.won ? 'WIN' : 'LOSS'}

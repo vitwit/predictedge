@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { TrendingUp, TrendingDown, Zap, Clock } from 'lucide-react'
-import { getMarketStats, getRecentMarkets } from '../api'
+import { TrendingUp, TrendingDown, Zap, Clock, Activity, ShieldCheck, ShieldX } from 'lucide-react'
+import { getMarketStats, getRecentMarkets, getLiveSignals } from '../api'
 import { useWebSocket } from '../hooks/useWebSocket'
 import clsx from 'clsx'
 
@@ -128,6 +128,7 @@ export default function LiveDashboard() {
   const [loading, setLoading] = useState(true)
   const [nowMs, setNowMs] = useState(Date.now())
   const [flashLive, setFlashLive] = useState(false)
+  const [liveSignals, setLiveSignals] = useState<any>(null)
 
   const refreshStats = () => {
     getMarketStats()
@@ -170,6 +171,18 @@ export default function LiveDashboard() {
     const timer = setInterval(() => setNowMs(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    let mounted = true
+    const load = () => {
+      getLiveSignals(selectedInterval)
+        .then(d => { if (mounted) setLiveSignals(d) })
+        .catch(() => {})
+    }
+    load()
+    const timer = setInterval(load, 10000)
+    return () => { mounted = false; clearInterval(timer) }
+  }, [selectedInterval])
 
   const strongStreaks = streaks.filter(s => s.streak_length >= 4)
   const allStreaks = streaks.sort((a, b) => b.streak_length - a.streak_length)
@@ -273,6 +286,107 @@ export default function LiveDashboard() {
           </div>
         </div>
       )}
+
+      {/* Live Signal Intelligence Panel */}
+      <div className="bg-panel border border-border rounded-lg overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div className="flex items-center gap-2">
+            <Activity size={14} className="text-accent" />
+            <h3 className="text-sm font-semibold text-white">Live Signal Intelligence</h3>
+          </div>
+          <div className="flex items-center gap-3">
+            {['5', '15', '60'].map(i => (
+              <button
+                key={i}
+                onClick={() => setSelectedInterval(Number(i))}
+                className={clsx(
+                  'text-xs px-2.5 py-1 rounded transition-colors',
+                  selectedInterval === Number(i) ? 'bg-accent text-white' : 'text-neutral hover:text-white'
+                )}
+              >{i}m</button>
+            ))}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 divide-x divide-border">
+          {['BTC', 'ETH', 'SOL', 'XRP'].map(asset => {
+            const sig = liveSignals?.signals?.[asset]
+            const fused = sig?.fused_direction
+            const conf = sig?.composite_confidence ?? 0
+            const momentum = sig?.signals?.spot_momentum
+            const cross = sig?.signals?.cross_asset
+            const fvg = sig?.signals?.fair_value_gap
+            return (
+              <div key={asset} className="p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-bold text-white">{asset}</span>
+                  {fused ? (
+                    <span className={clsx(
+                      'text-xs px-2 py-0.5 rounded font-bold flex items-center gap-1',
+                      fused === 'UP' ? 'bg-up/15 text-up' : 'bg-down/15 text-down'
+                    )}>
+                      {fused === 'UP' ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
+                      {fused}
+                    </span>
+                  ) : (
+                    <span className="text-xs px-2 py-0.5 rounded bg-neutral/10 text-neutral">NEUTRAL</span>
+                  )}
+                </div>
+
+                {/* Confidence bar */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-neutral uppercase tracking-wider">Confidence</span>
+                    <span className="text-[10px] mono text-white">{conf.toFixed(0)}%</span>
+                  </div>
+                  <div className="h-1.5 bg-border rounded-full overflow-hidden">
+                    <div
+                      className={clsx(
+                        'h-full rounded-full transition-all duration-500',
+                        conf > 60 ? (fused === 'UP' ? 'bg-up' : 'bg-down') : 'bg-accent/50'
+                      )}
+                      style={{ width: `${Math.min(100, conf)}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Mini signal rows */}
+                <div className="space-y-1 text-[11px]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-neutral">Spot {momentum?.spot_chg_30s != null ? `${momentum.spot_chg_30s > 0 ? '+' : ''}${momentum.spot_chg_30s?.toFixed(3)}%` : '—'}</span>
+                    <span className={clsx('font-medium', momentum?.direction === 'UP' ? 'text-up' : momentum?.direction === 'DOWN' ? 'text-down' : 'text-neutral/50')}>
+                      {momentum?.bin_label ?? '—'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-neutral">Cross-asset</span>
+                    <span className={clsx('font-medium', cross?.agreement_count >= 3 ? 'text-up' : cross?.agreement_count === 0 ? 'text-neutral/50' : 'text-yellow-400')}>
+                      {cross ? `${cross.up_count}↑ ${cross.down_count}↓` : '—'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-neutral">FV Gap</span>
+                    <span className={clsx('font-medium mono',
+                      fvg?.direction === 'UP' ? 'text-up' :
+                      fvg?.direction === 'DOWN' ? 'text-down' : 'text-neutral/50'
+                    )}>
+                      {fvg?.gap_cents != null ? `${fvg.gap_cents > 0 ? '+' : ''}${fvg.gap_cents.toFixed(1)}¢` : '—'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Reason codes */}
+                {(sig?.reason_codes || []).length > 0 && (
+                  <div className="flex flex-wrap gap-1 pt-1">
+                    {sig.reason_codes.slice(0, 2).map((r: string, i: number) => (
+                      <span key={i} className="text-[9px] bg-accent/10 text-accent/80 px-1.5 py-0.5 rounded">{r}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
 
       {/* Streak Grid */}
       <div>
