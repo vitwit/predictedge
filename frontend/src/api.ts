@@ -153,3 +153,37 @@ export const createStrategy = (name: string, description: string, config: object
 
 export const listStrategies = () =>
   api.get('/strategies').then(r => r.data)
+
+// ── Quant Intelligence API ─────────────────────────────────────────────────
+export const getQuantRegime = () =>
+  api.get('/quant/regime').then(r => r.data)
+
+export const getQuantRegimeAsset = (asset: string) =>
+  api.get(`/quant/regime/${asset}`).then(r => r.data)
+
+export const getEdgeHealth = () =>
+  api.get('/quant/edge-health').then(r => r.data)
+
+export const getPortfolioState = () =>
+  api.get('/quant/portfolio-state').then(r => r.data)
+
+export const resetCircuitBreaker = () =>
+  api.post('/quant/circuit-breaker/reset').then(r => r.data)
+
+export const getSignalTape = (limit = 50) =>
+  api.get('/quant/signal-tape', { params: { limit } }).then(r => r.data)
+
+export const getHotspot = (asset: string, interval: number) =>
+  api.get(`/quant/hotspot/${asset}/${interval}`).then(r => r.data)
+
+export const getImpulse = (asset: string, interval: number) =>
+  api.get(`/quant/impulse/${asset}/${interval}`).then(r => r.data)
+
+export const getCalibration = (asset: string, interval: number, spot_change_pct: number, clob_mid?: number, predicted_side = 'UP') =>
+  api.get('/quant/calibration', { params: { asset, interval_minutes: interval, spot_change_pct, clob_mid, predicted_side } }).then(r => r.data)
+
+export const getLlmDecisions = (limit = 20) =>
+  api.get('/quant/llm-decisions', { params: { limit } }).then(r => r.data)
+
+export const getOrderPerformance = (limit = 100) =>
+  api.get('/quant/order-performance', { params: { limit } }).then(r => r.data)

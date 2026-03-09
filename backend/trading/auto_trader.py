@@ -15,6 +15,7 @@ from py_clob_client.clob_types import ApiCreds, OrderArgs
 from py_clob_client.order_builder.constants import BUY
 
 from analytics.patterns import find_top_patterns
+from analytics.edge_monitor import sync_from_resolved_trades, update_edge_stats
 from config import config
 from db import get_connection
 from ingestion.polymarket import fetch_active_crypto_markets
@@ -23,6 +24,7 @@ from trading.decision_policy import (
     evaluate as policy_evaluate,
     persist_signal_event_with_order,
 )
+from trading.risk_manager import get_risk_manager
 
 logger = logging.getLogger(__name__)
 
@@ -266,14 +268,45 @@ class AutoTrader:
         if not self._client:
             return
 
+        # Initialize edge monitor from historical trades
+        try:
+            sync_from_resolved_trades()
+        except Exception as e:
+            logger.warning("edge monitor sync failed: %s", e)
+
+        # Periodically update edge stats from new resolutions
+        _last_edge_sync = [int(time.time())]
+
         while self.running:
             try:
+                # Re-sync edge stats every 10 minutes
+                now = int(time.time())
+                if now - _last_edge_sync[0] > 600:
+                    try:
+                        sync_from_resolved_trades()
+                        _last_edge_sync[0] = now
+                    except Exception as e:
+                        logger.warning("edge monitor re-sync failed: %s", e)
+
+                rm = get_risk_manager()
+                risk_state = rm.get_state()
+                if risk_state["circuit_breaker_active"]:
+                    rem = risk_state["circuit_breaker_remaining_s"]
+                    logger.info("Circuit breaker active (%ds remaining) — skipping loop", rem)
+                    time.sleep(self.loop_seconds)
+                    continue
+
                 logger.info(
-                    "Checking patterns: top_n=%s min_win_rate=%.1f%% order_price=%.2f order_size=%.4f",
+                    "Checking patterns: top_n=%s min_win_rate=%.1f%% order_price=%.2f order_size=%.4f"
+                    " | open_positions=%d invested=%.2f pnl=%.2f streak=%d",
                     TOP_PATTERN_COUNT,
                     MIN_WIN_RATE_PCT,
                     self.order_price,
                     self.order_size,
+                    risk_state["open_position_count"],
+                    risk_state["total_invested"],
+                    risk_state["realized_pnl"],
+                    risk_state["consecutive_losses"],
                 )
                 active = fetch_active_crypto_markets()
                 by_asset_interval = {
@@ -317,6 +350,19 @@ class AutoTrader:
 
                         # ── Decision Policy gate ─────────────────────────────
                         snap = _live_market_snapshot(self._client, str(token_id), market, interval)
+                        # Enrich snapshot with CLOB mid
+                        bids_raw = []
+                        asks_raw = []
+                        clob_mid = None
+                        try:
+                            book = self._client.get_order_book(str(token_id))
+                            bids_raw = sorted(book.bids or [], key=lambda x: -float(x.price))
+                            asks_raw = sorted(book.asks or [], key=lambda x: float(x.price))
+                            if bids_raw and asks_raw:
+                                clob_mid = (float(bids_raw[0].price) + float(asks_raw[0].price)) / 2.0
+                        except Exception:
+                            pass
+
                         sig_inputs = SignalInputs(
                             slug=slug,
                             asset=asset,
@@ -331,6 +377,9 @@ class AutoTrader:
                             ask_depth_5c=snap["ask_depth_5c"],
                             depth_imbalance=snap["depth_imbalance"],
                             time_remaining_s=snap["time_remaining_s"],
+                            clob_mid=clob_mid,
+                            bid_size=float(bids_raw[0].size) if bids_raw else None,
+                            ask_size=float(asks_raw[0].size) if asks_raw else None,
                             order_price=float(self.order_price),
                             order_size=float(self.order_size),
                         )
@@ -344,11 +393,14 @@ class AutoTrader:
                             continue
                         # ────────────────────────────────────────────────────
 
+                        # Use Kelly-recommended size, capped by config
+                        actual_size = min(decision.recommended_size, float(self.order_size) * 3.0)
+
                         try:
                             args = OrderArgs(
                                 token_id=str(token_id),
                                 price=float(self.order_price),
-                                size=float(self.order_size),
+                                size=float(actual_size),
                                 side=BUY,
                             )
                             response = self._client.create_and_post_order(args)
@@ -360,17 +412,32 @@ class AutoTrader:
                                 pattern_str=pattern_str,
                                 predicted_side=predicted_side,
                                 price=self.order_price,
-                                size=self.order_size,
+                                size=actual_size,
                                 status="submitted",
                                 response_json=response if isinstance(response, dict) else {"response": str(response)},
                             )
                             persist_signal_event_with_order(sig_inputs, decision, order_id)
+
+                            # Register with risk manager
+                            get_risk_manager().open_position(
+                                token_id=str(token_id),
+                                slug=slug,
+                                asset=asset,
+                                interval=interval,
+                                size=actual_size,
+                                price=self.order_price,
+                                signal_type="PATTERN",
+                            )
+
                             logger.info(
                                 "Order SUCCESS: slug=%s asset=%s interval=%sm side=%s "
-                                "price=%.2f size=%.4f pattern=%s ev=%.4f conf=%.0f",
+                                "price=%.2f size=%.4f(kelly) pattern=%s ev=%.4f conf=%.0f "
+                                "calib_p=%.3f regime=%s llm=%s",
                                 slug, asset, interval, predicted_side,
-                                self.order_price, self.order_size, pattern_str,
+                                self.order_price, actual_size, pattern_str,
                                 decision.ev_score, decision.confidence,
+                                decision.calibrated_p_win, decision.regime,
+                                decision.llm_decision or "n/a",
                             )
                         except Exception as exc:
                             _record_order(
@@ -381,7 +448,7 @@ class AutoTrader:
                                 pattern_str=pattern_str,
                                 predicted_side=predicted_side,
                                 price=self.order_price,
-                                size=self.order_size,
+                                size=actual_size,
                                 status="failed",
                                 error=str(exc),
                             )

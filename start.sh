@@ -57,7 +57,7 @@ append_pid() {
 
 collect_existing_services() {
     local port
-    for port in 8000 3000 3001 3002; do
+    for port in 8888 3000 3001 3002; do
         for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true); do
             append_pid "$pid"
         done
@@ -106,9 +106,9 @@ if [ "$FULL_CLOB_SYNC" -eq 1 ]; then
     python3 -u -c "from ingestion.polymarket import sync_all_historical_markets; sync_all_historical_markets(start_page=${CLOB_START_PAGE}, end_page=${CLOB_END_PAGE}, show_progress=True)"
 fi
 
-echo "🔧 Starting backend on http://localhost:8000 ..."
-if lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "❌ Port 8000 is still in use after cleanup"
+echo "🔧 Starting backend on http://localhost:8888 ..."
+if lsof -nP -iTCP:8888 -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "❌ Port 8888 is still in use after cleanup"
     exit 1
 fi
 
@@ -123,7 +123,7 @@ for _ in $(seq 1 40); do
         echo "❌ Backend process exited during startup"
         exit 1
     fi
-    if curl -sf http://localhost:8000/health > /dev/null; then
+    if curl -sf http://localhost:8888/health > /dev/null; then
         READY=1
         break
     fi
@@ -144,12 +144,18 @@ FRONTEND_PID=$!
 
 sleep 2
 
+STRATEGY_MODE=$(grep -E '^STRATEGY_MODE=' "$ROOT/.env" 2>/dev/null | cut -d= -f2 || echo "streak_reversal")
+STREAK_SIZE=$(grep -E '^STREAK_REVERSAL_SIZE=' "$ROOT/.env" 2>/dev/null | cut -d= -f2 || echo "100")
+STREAK_PRICE=$(grep -E '^STREAK_REVERSAL_ORDER_PRICE=' "$ROOT/.env" 2>/dev/null | cut -d= -f2 || echo "0.50")
+
 echo ""
 echo "============================================"
 echo "  PredictEdge is running!"
 echo "  Frontend:   http://localhost:3000"
-echo "  Backend:    http://localhost:8000"
-echo "  API Docs:   http://localhost:8000/docs"
+echo "  Backend:    http://localhost:8888"
+echo "  API Docs:   http://localhost:8888/docs"
+echo "  Strategy:   $STRATEGY_MODE"
+echo "  Order size: \$$STREAK_SIZE @ ${STREAK_PRICE}c"
 echo "============================================"
 echo ""
 echo "Press Ctrl+C to stop all services"

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
   BarChart2, Activity, FlaskConical, Play,
-  Bot, Zap, Menu, X
+  Bot, Zap, Menu, X, Target, ClipboardList
 } from 'lucide-react'
 import clsx from 'clsx'
 import LiveDashboard from './components/LiveDashboard'
@@ -9,15 +9,19 @@ import PatternLab from './components/PatternLab'
 import Analytics from './components/Analytics'
 import Backtester from './components/Backtester'
 import AICopilot from './components/AICopilot'
+import QuantCockpit from './components/QuantCockpit'
+import ExecutionTracker from './components/ExecutionTracker'
 
-type Page = 'dashboard' | 'patterns' | 'analytics' | 'backtest' | 'copilot'
+type Page = 'dashboard' | 'patterns' | 'analytics' | 'backtest' | 'copilot' | 'quant' | 'execution'
 
 const NAV_ITEMS: { id: Page; label: string; icon: React.ElementType; badge?: string }[] = [
   { id: 'dashboard', label: 'Live Dashboard', icon: Activity },
+  { id: 'quant', label: 'Quant Cockpit', icon: Target, badge: 'NEW' },
+  { id: 'execution', label: 'Execution Tracker', icon: ClipboardList, badge: 'NEW' },
   { id: 'patterns', label: 'Pattern Lab', icon: FlaskConical },
   { id: 'analytics', label: 'Analytics Suite', icon: BarChart2 },
   { id: 'backtest', label: 'Backtester', icon: Play },
-  { id: 'copilot', label: 'AI Co-Pilot', icon: Bot, badge: 'NEW' },
+  { id: 'copilot', label: 'AI Co-Pilot', icon: Bot },
 ]
 
 function Logo() {
@@ -98,6 +102,8 @@ export default function App() {
       <main className="flex-1 overflow-y-auto">
         <div className="p-6">
           {page === 'dashboard' && <LiveDashboard />}
+          {page === 'quant' && <QuantCockpit />}
+          {page === 'execution' && <ExecutionTracker />}
           {page === 'patterns' && <PatternLab />}
           {page === 'analytics' && <Analytics />}
           {page === 'backtest' && <Backtester />}

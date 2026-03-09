@@ -23,7 +23,7 @@ class Config:
 
     # Server
     HOST: str = os.getenv("HOST", "0.0.0.0")
-    PORT: int = int(os.getenv("PORT", "8000"))
+    PORT: int = int(os.getenv("PORT", "8888"))
     POLYGON_RPC_URL: str = os.getenv("POLYGON_RPC_URL", "")
 
     # Data ingestion settings
@@ -49,6 +49,61 @@ class Config:
     # Binance WebSocket
     BINANCE_WS_URL: str = "wss://stream.binance.com:9443/ws"
     BINANCE_REST_URL: str = "https://api.binance.com/api/v3"
+
+    # OpenRouter LLM gate (synthesis for borderline decisions)
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3-5-haiku")
+    LLM_GATE_ENABLED: bool = os.getenv("LLM_GATE_ENABLED", "true").lower() == "true"
+    LLM_GATE_CONF_MIN: float = float(os.getenv("LLM_GATE_CONF_MIN", "42"))   # call LLM below this
+    LLM_GATE_CONF_MAX: float = float(os.getenv("LLM_GATE_CONF_MAX", "62"))   # call LLM above this = no LLM
+
+    # Risk manager
+    MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "4"))
+    MAX_CAPITAL_AT_RISK_PCT: float = float(os.getenv("MAX_CAPITAL_AT_RISK_PCT", "20"))
+    CONSECUTIVE_LOSS_LIMIT: int = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "5"))
+    CONSECUTIVE_LOSS_PAUSE_S: int = int(os.getenv("CONSECUTIVE_LOSS_PAUSE_S", "1800"))
+    DRAWDOWN_LIMIT_PCT: float = float(os.getenv("DRAWDOWN_LIMIT_PCT", "20"))
+    ESTIMATED_BALANCE_USDC: float = float(os.getenv("ESTIMATED_BALANCE_USDC", "200"))
+
+    # Kelly position sizing
+    KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
+    KELLY_BASELINE_F: float = float(os.getenv("KELLY_BASELINE_F", "0.05"))
+    KELLY_MIN_MULT: float = float(os.getenv("KELLY_MIN_MULT", "0.5"))
+    KELLY_MAX_MULT: float = float(os.getenv("KELLY_MAX_MULT", "3.0"))
+    KELLY_CONF_TARGET: float = float(os.getenv("KELLY_CONF_TARGET", "70"))
+
+    # Regime classifier
+    REGIME_TREND_THRESHOLD_PCT: float = float(os.getenv("REGIME_TREND_THRESHOLD_PCT", "0.40"))
+    REGIME_HIGH_VOL_THRESHOLD_PCT: float = float(os.getenv("REGIME_HIGH_VOL_THRESHOLD_PCT", "0.50"))
+    REGIME_CHOP_THRESHOLD_PCT: float = float(os.getenv("REGIME_CHOP_THRESHOLD_PCT", "0.08"))
+
+    # Hotspot detector
+    HOTSPOT_BAND_CENTS: float = float(os.getenv("HOTSPOT_BAND_CENTS", "5"))
+    HOTSPOT_MIN_DWELL_S: int = int(os.getenv("HOTSPOT_MIN_DWELL_S", "30"))
+    IMPULSE_MOVE_CENTS: float = float(os.getenv("IMPULSE_MOVE_CENTS", "20"))
+    IMPULSE_TIME_S: int = int(os.getenv("IMPULSE_TIME_S", "5"))
+
+    # Edge monitor
+    EDGE_MONITOR_WINDOW: int = int(os.getenv("EDGE_MONITOR_WINDOW", "50"))
+    EDGE_MONITOR_MIN_WIN_RATE: float = float(os.getenv("EDGE_MONITOR_MIN_WIN_RATE", "45"))
+
+    # Streak Reversal Trader (focused BTC streak mean-reversion)
+    STREAK_REVERSAL_SIZE: float = float(os.getenv("STREAK_REVERSAL_SIZE", "100"))
+    STREAK_REVERSAL_ORDER_PRICE: float = float(os.getenv("STREAK_REVERSAL_ORDER_PRICE", "0.40"))
+    STREAK_REVERSAL_LOOP_S: int = int(os.getenv("STREAK_REVERSAL_LOOP_S", "15"))
+    STREAK_USD_REVERSAL_THRESHOLD: float = float(os.getenv("STREAK_USD_REVERSAL_THRESHOLD", "200"))
+    STREAK_USD_REVERSAL_THRESHOLD_5M: float = float(
+        os.getenv("STREAK_USD_REVERSAL_THRESHOLD_5M", os.getenv("STREAK_USD_REVERSAL_THRESHOLD", "200"))
+    )
+    STREAK_USD_REVERSAL_THRESHOLD_15M: float = float(
+        os.getenv("STREAK_USD_REVERSAL_THRESHOLD_15M", "400")
+    )
+
+    # Strategy mode: which traders to run
+    # streak_reversal  — only the 6x UP reversal strategy (current focus)
+    # all              — run all traders (pattern + fast_reversal + streak_reversal)
+    # pattern          — only pattern-based auto trader
+    STRATEGY_MODE: str = os.getenv("STRATEGY_MODE", "streak_reversal")
 
     # Feature flags
     DEMO_MODE: bool = os.getenv("DEMO_MODE", "true").lower() == "true"

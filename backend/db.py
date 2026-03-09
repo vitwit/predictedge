@@ -293,6 +293,78 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_signal_events_slug ON signal_events(slug);
     CREATE INDEX IF NOT EXISTS idx_signal_events_created_at ON signal_events(created_at);
     CREATE INDEX IF NOT EXISTS idx_signal_events_decision ON signal_events(decision);
+
+    CREATE TABLE IF NOT EXISTS edge_stats (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_type     TEXT    NOT NULL,
+        asset           TEXT    NOT NULL,
+        interval_minutes INTEGER NOT NULL,
+        window_n        INTEGER NOT NULL DEFAULT 50,
+        win_count       INTEGER NOT NULL DEFAULT 0,
+        loss_count      INTEGER NOT NULL DEFAULT 0,
+        win_rate        REAL    NOT NULL DEFAULT 0,
+        avg_ev          REAL    DEFAULT 0,
+        is_active       INTEGER DEFAULT 1,
+        last_updated    INTEGER NOT NULL,
+        UNIQUE(signal_type, asset, interval_minutes)
+    );
+
+    CREATE TABLE IF NOT EXISTS portfolio_state (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        snapshot_at           INTEGER NOT NULL,
+        open_positions        TEXT    DEFAULT '[]',
+        total_invested        REAL    DEFAULT 0,
+        realized_pnl          REAL    DEFAULT 0,
+        consecutive_losses    INTEGER DEFAULT 0,
+        peak_balance          REAL    DEFAULT 0,
+        drawdown_pct          REAL    DEFAULT 0,
+        circuit_breaker_until INTEGER DEFAULT 0,
+        notes                 TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS llm_decisions (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug             TEXT    NOT NULL,
+        asset            TEXT    NOT NULL,
+        interval_minutes INTEGER NOT NULL,
+        model            TEXT    NOT NULL,
+        prompt_context   TEXT,
+        llm_response     TEXT,
+        decision         TEXT    NOT NULL,
+        reasoning        TEXT,
+        confidence_in    REAL,
+        latency_ms       INTEGER,
+        created_at       INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_llm_decisions_slug ON llm_decisions(slug);
+    CREATE INDEX IF NOT EXISTS idx_llm_decisions_created_at ON llm_decisions(created_at);
+
+    CREATE TABLE IF NOT EXISTS market_features (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug            TEXT    NOT NULL,
+        asset           TEXT    NOT NULL,
+        interval_minutes INTEGER NOT NULL,
+        captured_at     INTEGER NOT NULL,
+        clob_mid        REAL,
+        spread_cents    REAL,
+        bid_depth_5c    REAL,
+        ask_depth_5c    REAL,
+        depth_imbalance REAL,
+        microprice      REAL,
+        hotspot_zone    TEXT,
+        hotspot_dwell_s INTEGER,
+        hotspot_side    TEXT,
+        impulse_cents   REAL,
+        impulse_dir     TEXT,
+        regime          TEXT,
+        spot_vol_30s    REAL,
+        spot_change_30s REAL,
+        spot_change_60s REAL,
+        spot_change_120s REAL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mf_slug_ts ON market_features(slug, captured_at);
     """)
 
     conn.commit()

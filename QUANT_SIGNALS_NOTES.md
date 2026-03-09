@@ -412,6 +412,67 @@ Order below is optimized for fastest path to measurable profitability improvemen
 
 ---
 
+## 17) Revised Architecture (Mar 2026 — Implementation Target)
+
+### Signal Stack (7 layers, highest to lowest latency)
+
+```
+[1] CLOB Microprice Drift        → sub-second, live orderbook
+[2] Hotspot Detector             → 30s dwell zone + dominant depth
+[3] Impulse Detector             → ≥20c/5s continuation vs reversal
+[4] Spot Momentum (calibrated)   → 30s/60s/120s spot move × P(UP|bin)
+[5] Cross-Asset Confirmation     → 3+ assets aligned → confidence boost
+[6] Fair Value Gap               → P(UP|spot_bin) vs CLOB midpoint
+[7] USD Reversal (prev window)   → P(reversal|prev_usd_move bucket)
+```
+
+### Calibration Layer (Bayesian P(win))
+- Historical lookup table: P(UP | asset, interval, spot_bin, hour_bucket)
+- Trained on 29k+ resolved markets in market_resolutions table
+- Combined with CLOB market consensus: P_final = 0.5*P_hist + 0.5*P_market
+- Confidence interval: Wilson score with n ≥ 30 minimum
+
+### EV Model (per trade)
+```
+EV = P(win) * (payout_if_win * (1 - fee) - size)
+   + P(lose) * (-size)
+fee = 0.02 (Polymarket 2%)
+slippage = 0.005 per unit (estimated)
+Trade only if: EV > 0 AND Kelly_size > 0 AND confidence > min_conf
+```
+
+### Kelly Position Sizing
+```
+b = (1 - price) / price          # net odds on UP at given price
+f* = (win_rate * b - loss_rate) / b
+size = base_size * (f* / 0.05) * 0.25 * (confidence / 70)
+  clamp [0.5x, 3x] base_size
+```
+
+### Regime Conditioning
+Signal reliability varies by market regime:
+- TREND: Momentum signals strong, reversal signals weak
+- HIGH_VOL: All signals less reliable, reduce size
+- MEAN_REVERT: Reversal signals strong, momentum weak
+- CHOP: Skip all pattern/momentum signals, use only extreme FVG
+- NORMAL: All signals at baseline reliability
+
+### OpenRouter LLM Gate (borderline cases only)
+- Called ONLY when quantitative confidence is 42-62% AND EV > 0
+- Model: claude-3-5-haiku (speed) or claude-3-7-sonnet (quality)
+- Context: market state, all signal scores, pattern, regime, risk
+- Returns: APPROVE/REJECT + reasoning (recorded in llm_decisions table)
+- All high-confidence (>62%) and low-confidence (<42%) decisions bypass LLM
+
+### Portfolio Risk Controls
+- Max concurrent positions: 4 (one per asset max)
+- Max capital at risk: 20% of estimated balance
+- Consecutive loss circuit breaker: 5 losses → pause 30min
+- Drawdown circuit breaker: 20% drawdown → pause until manual reset
+- Kill switch: any API error streak → graceful stop with alert
+
+---
+
 ## 16) Deep Signal Gap Analysis — Ground Truth from Data (Mar 2026)
 
 ### What the data actually tells us

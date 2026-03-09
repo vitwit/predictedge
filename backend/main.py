@@ -23,6 +23,7 @@ from ingestion.polymarket import start_clob_ingestion, stop_clob_ingestion, sync
 from trading.auto_trader import start_auto_trader, stop_auto_trader
 from trading.auto_claimer import start_auto_claimer, stop_auto_claimer
 from trading.fast_reversal import start_fast_reversal, stop_fast_reversal
+from trading.streak_reversal_trader import start_streak_reversal_trader, stop_streak_reversal_trader
 from analytics.streaks import get_current_streaks, get_streak_reversal_stats, get_resolution_history
 from analytics.patterns import (
     scan_pattern,
@@ -34,6 +35,12 @@ from analytics.momentum import get_momentum_stats, get_peak_trough_heatmap, get_
 from analytics.temporal import get_hourly_bias, get_day_of_week_bias, get_session_stats, get_time_remaining_probability
 from analytics.correlation import get_asset_correlation_matrix, get_spot_correlation_stats
 from analytics.backtester import backtest_streak_reversal, backtest_fade_pump
+from analytics.regime_classifier import classify_all_regimes, classify_regime
+from analytics.calibration import combined_p_win, refresh_cache as refresh_calib_cache
+from analytics.edge_monitor import get_all_edge_stats
+from analytics.feature_store import detect_hotspot, detect_impulse
+from analytics.llm_gate import get_recent_decisions as get_llm_decisions
+from trading.risk_manager import get_risk_manager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -96,10 +103,24 @@ async def lifespan(app: FastAPI):
 
     # Start Polymarket CLOB ingestion
     start_clob_ingestion()
-    # Start automated pattern-based trader
-    start_auto_trader()
-    start_fast_reversal()
-    # Start automated winnings claimer
+
+    mode = config.STRATEGY_MODE
+    logger.info("Strategy mode: %s", mode)
+
+    if mode == "streak_reversal":
+        # FOCUSED MODE: only the BTC streak reversal strategy
+        start_streak_reversal_trader()
+        logger.info("Running ONLY streak_reversal strategy (BTC 6x UP → DOWN, $%.0f @ %.2f)", config.STREAK_REVERSAL_SIZE, config.STREAK_REVERSAL_ORDER_PRICE)
+    elif mode == "all":
+        start_auto_trader()
+        start_fast_reversal()
+        start_streak_reversal_trader()
+    else:
+        # default: pattern only
+        start_auto_trader()
+        start_fast_reversal()
+
+    # Start automated winnings claimer (always runs)
     start_auto_claimer()
 
     # Backfill recent closed market history continuously (non-blocking startup).
@@ -119,11 +140,21 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_historical_sync_loop, daemon=True).start()
     
+    # Warm up calibration cache in background
+    def _warm_caches():
+        try:
+            refresh_calib_cache()
+            logger.info("Calibration cache warmed")
+        except Exception as e:
+            logger.warning("Calibration cache warmup failed: %s", e)
+    threading.Thread(target=_warm_caches, daemon=True).start()
+
     # Start broadcast loop
     asyncio.create_task(broadcast_loop())
     
     logger.info(f"PredictEdge running on {config.HOST}:{config.PORT}")
     yield
+    stop_streak_reversal_trader()
     stop_fast_reversal()
     stop_auto_claimer()
     stop_auto_trader()
@@ -724,27 +755,26 @@ class CopilotQuery(BaseModel):
 
 @app.post("/api/copilot")
 async def ai_copilot(req: CopilotQuery):
-    """AI co-pilot powered by OpenAI with access to platform data."""
-    if not config.OPENAI_API_KEY:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
-    
+    """AI co-pilot powered by OpenRouter (or OpenAI fallback) with access to platform data."""
+    import requests as _requests
+
+    if not config.OPENROUTER_API_KEY and not config.OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="Set OPENROUTER_API_KEY (or OPENAI_API_KEY) in .env")
+
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=config.OPENAI_API_KEY)
-        
         # Get current context
         streaks = get_current_streaks()
         streak_summary = ", ".join([
             f"{s['asset']} {s['interval']}m: {s['streak_length']}x {s['direction']}"
             for s in streaks[:5]
         ])
-        
+
         conn = get_connection()
         resolution_count = conn.execute("SELECT COUNT(*) FROM market_resolutions").fetchone()[0]
         conn.close()
-        
+
         system_prompt = f"""You are the PredictEdge AI Co-Pilot, an expert on crypto prediction markets.
-        
+
 You have access to a database of {resolution_count} market resolutions for BTC, ETH, SOL, XRP across 5m, 15m, 1h intervals.
 
 Current streaks: {streak_summary}
@@ -757,17 +787,38 @@ You help traders:
 
 Always include confidence intervals, sample sizes, and statistical caveats.
 Keep responses concise and actionable."""
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": req.query},
-            ],
-            max_tokens=500,
-        )
-        
-        answer = response.choices[0].message.content
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": req.query},
+        ]
+
+        # Prefer OpenRouter; fall back to OpenAI
+        if config.OPENROUTER_API_KEY:
+            model = config.OPENROUTER_MODEL or "anthropic/claude-3-5-haiku"
+            resp = _requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://predictedge.vitwit.com",
+                    "X-Title": "PredictEdge Co-Pilot",
+                },
+                json={"model": model, "messages": messages, "max_tokens": 800, "temperature": 0.3},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            answer = resp.json()["choices"][0]["message"]["content"]
+        else:
+            from openai import OpenAI
+            client = OpenAI(api_key=config.OPENAI_API_KEY)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                max_tokens=800,
+            )
+            answer = response.choices[0].message.content
+
         return {
             "answer": answer,
             "data": None,
@@ -775,6 +826,271 @@ Keep responses concise and actionable."""
         }
     except Exception as e:
         return {"answer": f"AI Co-Pilot error: {str(e)}", "data": None, "suggested_actions": []}
+
+
+# ─── Quant Intelligence API ─────────────────────────────────────────────────
+
+@app.get("/api/quant/regime")
+def api_quant_regime():
+    """Current market regime for all assets."""
+    return classify_all_regimes()
+
+
+@app.get("/api/quant/regime/{asset}")
+def api_quant_regime_asset(asset: str):
+    """Current market regime for a specific asset."""
+    return classify_regime(asset.upper())
+
+
+@app.get("/api/quant/edge-health")
+def api_quant_edge_health():
+    """Rolling edge statistics per signal type × asset × interval."""
+    return {"stats": get_all_edge_stats()}
+
+
+@app.get("/api/quant/portfolio-state")
+def api_quant_portfolio_state():
+    """Current portfolio risk state."""
+    return get_risk_manager().get_state()
+
+
+@app.post("/api/quant/circuit-breaker/reset")
+def api_quant_cb_reset():
+    """Manually reset circuit breaker."""
+    get_risk_manager().reset_circuit_breaker()
+    return {"status": "reset", "state": get_risk_manager().get_state()}
+
+
+@app.get("/api/quant/signal-tape")
+def api_quant_signal_tape(limit: int = Query(50, le=200)):
+    """Last N signal decisions with full context."""
+    try:
+        conn = get_connection()
+        rows = conn.execute(
+            """
+            SELECT se.*, o.order_size, o.trigger_type
+            FROM signal_events se
+            LEFT JOIN auto_trade_orders o ON o.id = se.order_id
+            ORDER BY se.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        conn.close()
+        return {"events": [dict(r) for r in rows]}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/quant/hotspot/{asset}/{interval_minutes}")
+def api_quant_hotspot(asset: str, interval_minutes: int):
+    """Current hotspot zone for a market."""
+    try:
+        conn = get_connection()
+        row = conn.execute(
+            """
+            SELECT slug FROM price_ticks
+            WHERE asset = ? AND interval_minutes = ?
+            ORDER BY ticked_at DESC LIMIT 1
+            """,
+            (asset.upper(), interval_minutes),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {"active": False, "slug": None}
+        slug = row["slug"]
+        result = detect_hotspot(slug)
+        result["slug"] = slug
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/quant/impulse/{asset}/{interval_minutes}")
+def api_quant_impulse(asset: str, interval_minutes: int):
+    """Current impulse detection for a market."""
+    try:
+        conn = get_connection()
+        row = conn.execute(
+            """
+            SELECT slug FROM price_ticks
+            WHERE asset = ? AND interval_minutes = ?
+            ORDER BY ticked_at DESC LIMIT 1
+            """,
+            (asset.upper(), interval_minutes),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {"active": False, "slug": None}
+        slug = row["slug"]
+        result = detect_impulse(slug)
+        result["slug"] = slug
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/quant/calibration")
+def api_quant_calibration(
+    asset: str = Query(...),
+    interval_minutes: int = Query(...),
+    spot_change_pct: float = Query(0.0),
+    clob_mid: Optional[float] = Query(None),
+    predicted_side: str = Query("UP"),
+):
+    """Calibrated P(win) estimate for a potential trade."""
+    return combined_p_win(asset.upper(), interval_minutes, spot_change_pct, clob_mid, predicted_side=predicted_side)
+
+
+@app.get("/api/quant/llm-decisions")
+def api_quant_llm_decisions(limit: int = Query(20, le=100)):
+    """Recent LLM gate decisions."""
+    return {"decisions": get_llm_decisions(limit)}
+
+
+@app.get("/api/quant/order-performance")
+def api_quant_order_performance(limit: int = Query(100, le=500)):
+    """
+    Execution + outcome metrics for auto trade orders.
+    placed   = all order attempts
+    executed = accepted/submitted to CLOB
+    success  = resolved winner matches predicted_side
+    loss     = resolved winner opposite predicted_side
+    """
+    try:
+        conn = get_connection()
+        rows = conn.execute(
+            """
+            SELECT
+                o.id,
+                o.slug,
+                o.asset,
+                o.interval_minutes,
+                o.predicted_side,
+                COALESCE(o.trigger_type, 'PATTERN') AS trigger_type,
+                o.status,
+                o.order_price,
+                o.order_size,
+                o.response_json,
+                o.error,
+                o.created_at,
+                r.winner_side
+            FROM auto_trade_orders o
+            LEFT JOIN market_resolutions r ON r.slug = o.slug
+            ORDER BY o.created_at DESC
+            """
+        ).fetchall()
+        conn.close()
+
+        def _empty_bucket():
+            return {
+                "placed": 0,
+                "executed": 0,
+                "failed": 0,
+                "resolved": 0,
+                "wins": 0,
+                "losses": 0,
+            }
+
+        total = _empty_bucket()
+        by_interval: dict[int, dict] = {}
+        by_trigger: dict[str, dict] = {}
+        recent = []
+
+        for idx, r in enumerate(rows):
+            row = dict(r)
+            interval = int(row.get("interval_minutes") or 0)
+            trigger = str(row.get("trigger_type") or "PATTERN")
+            status = str(row.get("status") or "").lower()
+            predicted = str(row.get("predicted_side") or "").upper()
+            winner = (row.get("winner_side") or None)
+            winner_up = str(winner).upper() if winner else None
+            resolved = winner_up in {"UP", "DOWN"}
+
+            # placed = all attempts
+            total["placed"] += 1
+            by_interval.setdefault(interval, _empty_bucket())["placed"] += 1
+            by_trigger.setdefault(trigger, _empty_bucket())["placed"] += 1
+
+            executed = status == "submitted"
+            failed = status == "failed"
+            if executed:
+                total["executed"] += 1
+                by_interval[interval]["executed"] += 1
+                by_trigger[trigger]["executed"] += 1
+            if failed:
+                total["failed"] += 1
+                by_interval[interval]["failed"] += 1
+                by_trigger[trigger]["failed"] += 1
+
+            result = None
+            if executed and resolved:
+                total["resolved"] += 1
+                by_interval[interval]["resolved"] += 1
+                by_trigger[trigger]["resolved"] += 1
+                if predicted == winner_up:
+                    total["wins"] += 1
+                    by_interval[interval]["wins"] += 1
+                    by_trigger[trigger]["wins"] += 1
+                    result = "WIN"
+                else:
+                    total["losses"] += 1
+                    by_interval[interval]["losses"] += 1
+                    by_trigger[trigger]["losses"] += 1
+                    result = "LOSS"
+
+            if idx < limit:
+                order_id = None
+                try:
+                    payload = json.loads(row.get("response_json") or "{}")
+                    order_id = payload.get("orderID")
+                except Exception:
+                    order_id = None
+                recent.append(
+                    {
+                        "id": row["id"],
+                        "slug": row["slug"],
+                        "asset": row["asset"],
+                        "interval_minutes": interval,
+                        "predicted_side": predicted,
+                        "trigger_type": trigger,
+                        "status": row["status"],
+                        "order_price": row["order_price"],
+                        "order_size": row["order_size"],
+                        "order_id": order_id,
+                        "error": row["error"],
+                        "created_at": row["created_at"],
+                        "winner_side": winner_up,
+                        "resolved": resolved,
+                        "result": result,
+                    }
+                )
+
+        def _with_rate(d: dict):
+            dd = dict(d)
+            dd["win_rate_pct"] = round((dd["wins"] / dd["resolved"]) * 100, 2) if dd["resolved"] > 0 else None
+            return dd
+
+        interval_rows = []
+        for k in sorted(by_interval.keys()):
+            item = _with_rate(by_interval[k])
+            item["interval_minutes"] = k
+            interval_rows.append(item)
+
+        trigger_rows = []
+        for k in sorted(by_trigger.keys()):
+            item = _with_rate(by_trigger[k])
+            item["trigger_type"] = k
+            trigger_rows.append(item)
+
+        return {
+            "summary": _with_rate(total),
+            "by_interval": interval_rows,
+            "by_trigger": trigger_rows,
+            "recent_orders": recent,
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 # ─── WebSocket ──────────────────────────────────────────────────────────

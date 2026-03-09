@@ -265,37 +265,44 @@ def fetch_closed_crypto_markets_since(days: int = 30, page_limit: int = 200, max
     now_ts = int(time.time())
     cutoff_ts = int(time.time()) - days * 24 * 3600
     cutoff_iso = datetime.utcfromtimestamp(cutoff_ts).strftime("%Y-%m-%dT%H:%M:%SZ")
-    markets: List[Dict] = []
-    offset = 0
+    def _scan(include_end_date_min: bool) -> List[Dict]:
+        out: List[Dict] = []
+        offset = 0
+        for _ in range(max_pages):
+            params = {
+                "closed": "true",
+                "tag_slug": "crypto",
+                "limit": page_limit,
+                "offset": offset,
+            }
+            if include_end_date_min:
+                params["end_date_min"] = cutoff_iso
+            resp = requests.get(f"{GAMMA_BASE}/markets", params=params, timeout=15)
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
 
-    for _ in range(max_pages):
-        params = {
-            "closed": "true",
-            "tag_slug": "crypto",
-            "end_date_min": cutoff_iso,
-            "limit": page_limit,
-            "offset": offset,
-        }
-        resp = requests.get(f"{GAMMA_BASE}/markets", params=params, timeout=15)
-        resp.raise_for_status()
-        batch = resp.json()
-        if not batch:
-            break
+            for market in batch:
+                normalized = _normalize_closed_market(
+                    market,
+                    cutoff_ts=cutoff_ts,
+                    require_known_asset=True,
+                    require_supported_interval=True,
+                )
+                if normalized and normalized.get("end_ts", 0) <= now_ts:
+                    out.append(normalized)
 
-        for market in batch:
-            normalized = _normalize_closed_market(
-                market,
-                cutoff_ts=cutoff_ts,
-                require_known_asset=True,
-                require_supported_interval=True,
-            )
-            if normalized and normalized.get("end_ts", 0) <= now_ts:
-                markets.append(normalized)
+            offset += page_limit
+            if len(batch) < page_limit:
+                break
+        return out
 
-        offset += page_limit
-        if len(batch) < page_limit:
-            break
-
+    # Primary path with end_date_min filter.
+    markets = _scan(include_end_date_min=True)
+    # Gamma can intermittently return empty for end_date_min; fallback to local cutoff filtering.
+    if not markets:
+        markets = _scan(include_end_date_min=False)
     return markets
 
 
@@ -638,7 +645,21 @@ def sync_historical_markets(days: int = 30) -> Dict[str, int]:
     """
     markets = fetch_closed_crypto_markets_since(days=days)
     if not markets:
-        return {"markets_fetched": 0, "rows_upserted": 0}
+        # Fallback path: Gamma /markets closed feed can intermittently return empty.
+        # Use tag/events pagination for latest pages to keep market_resolutions fresh.
+        try:
+            fallback = sync_all_historical_markets(
+                start_page=1,
+                end_page=8,
+                days=days,
+                show_progress=False,
+            )
+            return {
+                "markets_fetched": int(fallback.get("markets_counted", 0)),
+                "rows_upserted": int(fallback.get("rows_upserted", 0)),
+            }
+        except Exception:
+            return {"markets_fetched": 0, "rows_upserted": 0}
 
     conn = get_connection()
     upserted = 0

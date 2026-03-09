@@ -71,8 +71,8 @@ From repo root:
 
 App URLs:
 - Frontend: `http://localhost:3000`
-- Backend: `http://localhost:8000`
-- API docs: `http://localhost:8000/docs`
+- Backend: `http://localhost:8888`
+- API docs: `http://localhost:8888/docs`
 
 ## Optional: full historical sync before startup
 
