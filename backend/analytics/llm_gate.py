@@ -160,7 +160,7 @@ def _call_openai_fallback(prompt: str) -> Optional[Dict]:
             OPENAI_BASE,
             headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "gpt-4o-mini",
+                "model": config.OPENAI_MODEL,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
@@ -173,7 +173,7 @@ def _call_openai_fallback(prompt: str) -> Optional[Dict]:
         latency_ms = int((time.time() - start) * 1000)
         if resp.status_code == 200:
             text = resp.json()["choices"][0]["message"]["content"].strip()
-            return {"text": text, "latency_ms": latency_ms, "model": "gpt-4o-mini", "source": "openai"}
+            return {"text": text, "latency_ms": latency_ms, "model": config.OPENAI_MODEL, "source": "openai"}
     except Exception as e:
         logger.debug("OpenAI fallback failed: %s", e)
     return None

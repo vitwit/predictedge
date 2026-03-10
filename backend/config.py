@@ -15,8 +15,9 @@ class Config:
     PRIVATE_KEY: str = os.getenv("PRIVATE_KEY", "")
     WALLET_ADDRESS: str = os.getenv("WALLET_PROXY_SAFE", "")
 
-    # OpenAI for AI Co-Pilot
+    # OpenAI for AI Co-Pilot (and LLM gate fallback)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "openai/gpt-5-nano")
 
     # Database
     DB_PATH: str = os.getenv("DB_PATH", "predictedge.db")

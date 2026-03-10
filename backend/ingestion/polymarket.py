@@ -548,6 +548,15 @@ def _upsert_historical_market(market: Dict, conn, now: int):
     end_ts = market["end_ts"]
     start_ts = max(0, end_ts - interval * 60)
 
+    # Prefer Gamma/CLOB only: try Gamma event by slug for priceToBeat when missing (e.g. list response had no eventMetadata).
+    if asset == "BTC" and market.get("price_to_beat") is None:
+        try:
+            by_slug = _fetch_gamma_market_by_slug(slug)
+            if by_slug and by_slug.get("_price_to_beat") is not None:
+                market["price_to_beat"] = by_slug["_price_to_beat"]
+        except Exception:
+            pass
+
     close_up = market.get("close_up_price")
     winner_side = None
     if close_up is not None:
@@ -562,15 +571,15 @@ def _upsert_historical_market(market: Dict, conn, now: int):
     ).fetchone()
     open_up = float(open_up_row[0]) if open_up_row and open_up_row[0] is not None else (close_up if close_up is not None else 0.5)
 
-    # Chainlink open price from eventMetadata.priceToBeat (available for BTC only)
+    # Spot open/close: prefer Gamma eventMetadata.priceToBeat; fallback to spot_prices (our live feed) so USD reversal can fire.
+    # Gamma often does not return priceToBeat; without spot data, USD reversal never triggers.
     chainlink_open = market.get("price_to_beat")
     if chainlink_open is not None:
         chainlink_open = float(chainlink_open)
         spot_open = chainlink_open
-        # Close price will be set later by resync_chainlink.py (= next window's chainlink_open)
         spot_close = _nearest_spot_price(asset, end_ts, conn)
         if spot_close is None:
-            spot_close = chainlink_open  # fallback: same price (change=0) until next window fetched
+            spot_close = chainlink_open  # until next window is upserted
     else:
         spot_open = _nearest_spot_price(asset, start_ts, conn)
         spot_close = _nearest_spot_price(asset, end_ts, conn)
@@ -620,59 +629,81 @@ def _upsert_historical_market(market: Dict, conn, now: int):
         ),
     )
 
-    # Link this window to the previous consecutive window for reversal tracking
-    if spot_change is not None:
-        prev = conn.execute(
-            """SELECT spot_change_usd, spot_change_pct, winner_side
-               FROM market_resolutions
-               WHERE asset=? AND interval_minutes=? AND end_ts=?
-               LIMIT 1""",
-            (asset, interval, start_ts),
+    # Use this market's price_to_beat as the closing price for the previous (consecutive) market.
+    # Next window's open = Chainlink at that time = previous window's close.
+    price_to_beat_val = market.get("price_to_beat")
+    if price_to_beat_val is not None and isinstance(price_to_beat_val, (int, float)):
+        prev_end_ts = start_ts  # previous window ends when this one starts
+        prev_row = conn.execute(
+            """SELECT slug, spot_open, chainlink_open FROM market_resolutions
+               WHERE asset = ? AND interval_minutes = ? AND end_ts = ? LIMIT 1""",
+            (asset, interval, int(prev_end_ts)),
         ).fetchone()
-        if prev and prev["spot_change_usd"] is not None:
-            conn.execute(
-                """UPDATE market_resolutions
-                   SET prev_spot_change_usd=?, prev_spot_change_pct=?, prev_winner_side=?
-                   WHERE slug=?""",
-                (prev["spot_change_usd"], prev["spot_change_pct"], prev["winner_side"], slug),
-            )
+        if prev_row is not None:
+            prev_open = prev_row["spot_open"] if prev_row["spot_open"] is not None else prev_row["chainlink_open"]
+            if prev_open is not None:
+                close_prev = float(price_to_beat_val)
+                chg_usd = round(close_prev - float(prev_open), 6)
+                chg_pct = round((chg_usd / float(prev_open)) * 100.0, 6) if prev_open else None
+                conn.execute(
+                    """UPDATE market_resolutions SET
+                       spot_close = ?, spot_change_usd = ?, spot_change_pct = ?
+                       WHERE slug = ?""",
+                    (close_prev, chg_usd, chg_pct, prev_row["slug"]),
+                )
+
+    # Link this window to the previous consecutive window for reversal tracking
+    prev = conn.execute(
+        """SELECT spot_change_usd, spot_change_pct, winner_side
+           FROM market_resolutions
+           WHERE asset=? AND interval_minutes=? AND end_ts=?
+           LIMIT 1""",
+        (asset, interval, start_ts),
+    ).fetchone()
+    if prev and prev["spot_change_usd"] is not None:
+        conn.execute(
+            """UPDATE market_resolutions
+               SET prev_spot_change_usd=?, prev_spot_change_pct=?, prev_winner_side=?
+               WHERE slug=?""",
+            (prev["spot_change_usd"], prev["spot_change_pct"], prev["winner_side"], slug),
+        )
 
 
 def sync_historical_markets(days: int = 30) -> Dict[str, int]:
     """
     Backfill closed crypto markets from recent history.
-    Uses Gamma metadata and local spot snapshots to populate market_resolutions.
+    Strategy-critical: we always run tag-based sync (pages 1–8) so BTC 5m/15m
+    resolutions are present. Primary /markets?closed+crypto often returns older
+    politics/sports markets, not recent BTC 5m/15m — so we never rely on it alone.
     """
-    markets = fetch_closed_crypto_markets_since(days=days)
-    if not markets:
-        # Fallback path: Gamma /markets closed feed can intermittently return empty.
-        # Use tag/events pagination for latest pages to keep market_resolutions fresh.
+    conn = get_connection()
+    upserted = 0
+    try:
+        now = int(time.time())
+        # 1) Primary path: /markets closed+crypto (may return 0 or old markets)
+        markets = fetch_closed_crypto_markets_since(days=days)
+        for market in markets or []:
+            _upsert_historical_market(market, conn=conn, now=now)
+            upserted += 1
+        primary_count = len(markets) if markets else 0
+
+        # 2) Always run tag-based sync for recent pages so BTC 5m/15m are in DB.
+        # This is required for streak + USD reversal strategy; primary often misses them.
         try:
-            fallback = sync_all_historical_markets(
+            tag_result = sync_all_historical_markets(
                 start_page=1,
                 end_page=8,
                 days=days,
                 show_progress=False,
             )
-            return {
-                "markets_fetched": int(fallback.get("markets_counted", 0)),
-                "rows_upserted": int(fallback.get("rows_upserted", 0)),
-            }
-        except Exception:
-            return {"markets_fetched": 0, "rows_upserted": 0}
+            upserted += int(tag_result.get("rows_upserted", 0))
+        except Exception as e:
+            logger.warning("Tag-based historical sync failed: %s", e)
 
-    conn = get_connection()
-    upserted = 0
-    try:
-        now = int(time.time())
-        for market in markets:
-            _upsert_historical_market(market, conn=conn, now=now)
-            upserted += 1
         conn.commit()
+        return {"markets_fetched": primary_count, "rows_upserted": upserted}
     finally:
         conn.close()
-
-    return {"markets_fetched": len(markets), "rows_upserted": upserted}
 
 
 def sync_all_historical_markets(

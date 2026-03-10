@@ -290,34 +290,27 @@ We can now prioritize a small set of high-ROI signals and implement them one by 
 
 ## 12) What Is Missing Today (Gap Analysis)
 
-Current app is strong on descriptive analytics (streaks/patterns/history), but still weak on **execution-grade quant intelligence**.
+Updated to reflect current implementation. The app has **streak reversal + USD reversal** strategy, **calibration**, **risk manager**, **execution tracker**, and **Quant Cockpit**; gaps below are relative to the full 7-layer quant stack.
 
-### Missing in data layer
+### Data layer (current vs gaps)
 
-- No standardized **1s feature store** joining orderbook + spot + tick deltas per market window.
-- No robust **quality flags** (missing ticks, stale quotes, outlier spreads, bad price points).
-- No persistent **signal snapshots** (what signal fired, when, and under what context).
+- **Implemented**: Gamma tag-based + primary sync → `market_resolutions`; winner from `outcomePrices`; spot open/close from Gamma `eventMetadata.priceToBeat` only (next market’s `price_to_beat` = prev close). No external backfill; CLOB used for live orderbook/midpoint only.
+- **Gap**: No standardized **1s feature store** joining orderbook + spot + tick deltas per window; no robust **quality flags** (missing ticks, stale quotes); signal snapshots exist in `signal_events` / decision_policy but not fully wired to every order.
 
-### Missing in signal engine
+### Signal engine (current vs gaps)
 
-- No production **signal fusion** (pattern + orderbook + momentum + regime).
-- No calibrated **probability model** (`p(win)` with confidence intervals).
-- No **EV gate** after fees/slippage; current flow can trade on edge without net-EV checks.
-- No explicit **NO_TRADE** state based on market quality filters.
+- **Implemented**: Calibration (P(win) from history + CLOB blend), EV gate, regime classifier, hotspot/impulse detectors, edge monitor, LLM gate for borderline cases; streak reversal uses DB only (no EV in that path).
+- **Gap**: **Streak reversal** path does not use the full signal stack (no EV/regime in that trader); production **signal fusion** across all 7 layers is in decision_policy but not the only active strategy.
 
-### Missing in risk/execution
+### Risk/execution (current vs gaps)
 
-- No portfolio-level **exposure caps** across correlated assets/windows.
-- No live **drawdown guardrails** and adaptive risk throttling.
-- No execution-quality metrics (fill quality, slippage vs expected).
+- **Implemented**: Portfolio caps, drawdown/consecutive-loss circuit breakers, execution tracker (placed/executed/wins/losses), order-performance API.
+- **Gap**: Execution-quality metrics (fill quality, slippage vs expected) not yet in tracker.
 
-### Missing in dashboard (quant UX)
+### Dashboard (current vs gaps)
 
-- No real-time **signal tape** with reason codes.
-- No **hotspot/impulse/wall** live panels.
-- No **regime dashboard** (volatility, spread state, liquidity quality).
-- No **edge health** panel (signal decay, rolling win-rate, confidence calibration).
-- No **strategy explainability** card for each live trade decision.
+- **Implemented**: Quant Cockpit (regime, edge health, signal tape, LLM decisions), Execution Tracker (orders and outcomes).
+- **Gap**: Hotspot/impulse **live** panels are API-backed but not always surfaced; wall monitor not implemented; strategy explainability card per trade is partial.
 
 ---
 
@@ -565,3 +558,19 @@ Dashboard can be called quant-strong when all are true:
 - strategy has walk-forward validated edge net of fees/slippage;
 - risk controls are active and visible (caps, drawdown guard, kill switch);
 - edge decay monitoring can auto-disable degraded signals.
+
+---
+
+## 18) Data sources and constraints (current)
+
+All production data comes from **Gamma** and **CLOB** only; no third-party backfill.
+
+| Data | Source | Notes |
+|------|--------|--------|
+| Resolutions / winner_side | Gamma `outcomePrices` | From `/events` (by tag or slug) and `/markets`; close ≥0.999 → UP, ≤0.001 → DOWN. |
+| spot_open / spot_close / spot_change_usd | Gamma `eventMetadata.priceToBeat` | Only when API returns it. Previous window’s close = next market’s `price_to_beat`. For BTC we also try `/events?slug=...` when list response has no eventMetadata. |
+| Live orderbook / midpoint | CLOB | `/book`, `/midpoint` for active markets. |
+| CLOB price history | CLOB `/prices-history` | Token (outcome) price only, not underlying spot; not used for spot_change_usd. |
+| Historical sync | Gamma | Every 5 min: primary `/markets?closed=true&tag_slug=crypto` plus tag-based events (pages 1–8) so BTC 5m/15m are always synced. |
+
+**Constraints**: If Gamma does not return `priceToBeat` for a market, `spot_change_usd` remains null for that row; USD reversal trigger then cannot fire for that window. No Binance or other backfill is used for historical spot.
