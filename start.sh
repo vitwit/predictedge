@@ -3,6 +3,13 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
+# Load .env for configurable host/ports
+[ -f "$ROOT/.env" ] && set -a && . "$ROOT/.env" && set +a
+BACKEND_PORT=${PORT:-8888}
+FRONTEND_PORT=${FRONTEND_PORT:-3000}
+BACKEND_PROXY_TARGET=${BACKEND_PROXY_TARGET:-http://localhost:${BACKEND_PORT}}
+PUBLIC_HOST=${PUBLIC_HOST:-localhost}
+
 echo "🚀 Starting PredictEdge..."
 BACKEND_PID=""
 FRONTEND_PID=""
@@ -57,7 +64,7 @@ append_pid() {
 
 collect_existing_services() {
     local port
-    for port in 8888 3000 3001 3002; do
+    for port in $BACKEND_PORT $FRONTEND_PORT 3001 3002; do
         for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true); do
             append_pid "$pid"
         done
@@ -106,9 +113,9 @@ if [ "$FULL_CLOB_SYNC" -eq 1 ]; then
     python3 -u -c "from ingestion.polymarket import sync_all_historical_markets; sync_all_historical_markets(start_page=${CLOB_START_PAGE}, end_page=${CLOB_END_PAGE}, show_progress=True)"
 fi
 
-echo "🔧 Starting backend on http://localhost:8888 ..."
-if lsof -nP -iTCP:8888 -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "❌ Port 8888 is still in use after cleanup"
+echo "🔧 Starting backend on http://${PUBLIC_HOST}:${BACKEND_PORT} ..."
+if lsof -nP -iTCP:${BACKEND_PORT} -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "❌ Port ${BACKEND_PORT} is still in use after cleanup"
     exit 1
 fi
 
@@ -123,7 +130,7 @@ for _ in $(seq 1 40); do
         echo "❌ Backend process exited during startup"
         exit 1
     fi
-    if curl -sf http://localhost:8888/health > /dev/null; then
+    if curl -sf "http://localhost:${BACKEND_PORT}/health" > /dev/null; then
         READY=1
         break
     fi
@@ -138,7 +145,8 @@ echo "✅ Backend ready"
 
 # Frontend
 cd "$ROOT/frontend"
-echo "🎨 Starting frontend on http://localhost:3000 ..."
+export BACKEND_PROXY_TARGET FRONTEND_PORT
+echo "🎨 Starting frontend on http://${PUBLIC_HOST}:${FRONTEND_PORT} ..."
 npm run dev &
 FRONTEND_PID=$!
 
@@ -151,9 +159,9 @@ STREAK_PRICE=$(grep -E '^STREAK_REVERSAL_ORDER_PRICE=' "$ROOT/.env" 2>/dev/null 
 echo ""
 echo "============================================"
 echo "  PredictEdge is running!"
-echo "  Frontend:   http://localhost:3000"
-echo "  Backend:    http://localhost:8888"
-echo "  API Docs:   http://localhost:8888/docs"
+echo "  Frontend:   http://${PUBLIC_HOST}:${FRONTEND_PORT}"
+echo "  Backend:    http://${PUBLIC_HOST}:${BACKEND_PORT}"
+echo "  API Docs:   http://${PUBLIC_HOST}:${BACKEND_PORT}/docs"
 echo "  Strategy:   $STRATEGY_MODE"
 echo "  Order size: \$$STREAK_SIZE @ ${STREAK_PRICE}c"
 echo "============================================"

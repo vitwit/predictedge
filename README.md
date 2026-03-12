@@ -15,7 +15,7 @@ PredictEdge is a live quant-style dashboard and automation stack for Polymarket 
 
 - `backend/` — FastAPI, ingestion (Gamma + CLOB), analytics, trading, auto-claimer
 - `frontend/` — React + Vite dashboard (streaks, Quant Cockpit, Execution Tracker)
-- `start.sh` — starts backend (port 8888) + frontend (3000), optional full historical sync
+- `start.sh` — starts backend + frontend (ports configurable via `.env`), optional full historical sync
 
 ## Data and architecture
 
@@ -84,10 +84,12 @@ From repo root:
 ./start.sh
 ```
 
-App URLs:
-- Frontend: `http://localhost:3000`
-- Backend: `http://localhost:8888`
+App URLs (default ports; override via `.env`):
+- Frontend: `http://localhost:3000` (or `FRONTEND_PORT`)
+- Backend: `http://localhost:8888` (or `PORT`)
 - API docs: `http://localhost:8888/docs`
+
+**Production**: Set `HOST=0.0.0.0`, `PUBLIC_HOST=<your-server-ip>` in `.env` so URLs reflect the server address.
 
 ## Optional: full historical sync before startup
 

@@ -15,10 +15,14 @@ venv/
 
 # Backend runtime artifacts
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 *.log
 backend/*.db
+backend/*.db-shm
+backend/*.db-wal
 backend/*.log
 
 # Node / frontend

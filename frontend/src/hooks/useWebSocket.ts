@@ -11,11 +11,6 @@ function getWebSocketUrl() {
   if (import.meta.env.VITE_WS_URL) {
     return import.meta.env.VITE_WS_URL as string
   }
-
-  if (import.meta.env.DEV) {
-    return 'ws://localhost:8888/ws'
-  }
-
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
   return `${protocol}://${window.location.host}/ws`
 }
