@@ -17,6 +17,10 @@ from pydantic import BaseModel
 
 from config import config
 from db import init_db, get_connection
+
+# Initialize DB before any module imports that use tables (e.g. risk_manager)
+init_db()
+
 from bootstrap.clob_auth import ensure_clob_api_credentials
 from ingestion.spot_feed import start_spot_feed, get_spot_price
 from ingestion.polymarket import start_clob_ingestion, stop_clob_ingestion, sync_historical_markets
@@ -95,7 +99,6 @@ async def broadcast_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("PredictEdge starting...")
-    init_db()
     ensure_clob_api_credentials()
 
     # Start spot price feed
