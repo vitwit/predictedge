@@ -112,6 +112,14 @@ if [ -d ".venv" ]; then
     . .venv/bin/activate
 elif [ -d "venv" ]; then
     . venv/bin/activate
+else
+    echo "📦 Creating backend venv..."
+    python3 -m venv .venv
+    . .venv/bin/activate
+fi
+if ! python3 -c "import fastapi" 2>/dev/null; then
+    echo "📦 Installing backend dependencies..."
+    pip install -q -r requirements.txt
 fi
 if [ "$FULL_CLOB_SYNC" -eq 1 ]; then
     echo "📥 Running full CLOB historical sync (pages ${CLOB_START_PAGE}-${CLOB_END_PAGE})..."
