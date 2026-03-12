@@ -108,6 +108,11 @@ confirm_and_kill_existing_services
 
 # Backend
 cd "$ROOT/backend"
+if [ -d ".venv" ]; then
+    . .venv/bin/activate
+elif [ -d "venv" ]; then
+    . venv/bin/activate
+fi
 if [ "$FULL_CLOB_SYNC" -eq 1 ]; then
     echo "📥 Running full CLOB historical sync (pages ${CLOB_START_PAGE}-${CLOB_END_PAGE})..."
     python3 -u -c "from ingestion.polymarket import sync_all_historical_markets; sync_all_historical_markets(start_page=${CLOB_START_PAGE}, end_page=${CLOB_END_PAGE}, show_progress=True)"
